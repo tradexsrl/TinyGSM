@@ -16,6 +16,7 @@
 #define TINY_GSM_BUFFER_READ_AND_CHECK_SIZE
 
 #include "TinyGsmBattery.tpp"
+#include "TinyGsmCalling.tpp"							 
 #include "TinyGsmGPRS.tpp"
 #include "TinyGsmGPS.tpp"
 #include "TinyGsmGSMLocation.tpp"
@@ -54,7 +55,8 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
                        public TinyGsmTime<TinyGsmSim7600>,
                        public TinyGsmNTP<TinyGsmSim7600>,
                        public TinyGsmBattery<TinyGsmSim7600>,
-                       public TinyGsmTemperature<TinyGsmSim7600> {
+                       public TinyGsmTemperature<TinyGsmSim7600>,
+                       public TinyGsmCalling<TinyGsmSim7600> {
   friend class TinyGsmModem<TinyGsmSim7600>;
   friend class TinyGsmGPRS<TinyGsmSim7600>;
   friend class TinyGsmTCP<TinyGsmSim7600, TINY_GSM_MUX_COUNT>;
@@ -65,6 +67,7 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
   friend class TinyGsmNTP<TinyGsmSim7600>;
   friend class TinyGsmBattery<TinyGsmSim7600>;
   friend class TinyGsmTemperature<TinyGsmSim7600>;
+  friend class TinyGsmCalling<TinyGsmSim7600>;											  
 
   /*
    * Inner Client
@@ -127,18 +130,23 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
   /*
    * Inner Secure Client
    */
+	class GsmClientSecureSIM7600 : public GsmClientSim7600
+	{
+	public:
+		GsmClientSecureSIM7600() {}
 
-  /*TODO(?))
-  class GsmClientSecureSIM7600 : public GsmClientSim7600
-  {
-  public:
-    GsmClientSecure() {}
+			
+		GsmClientSecureSIM7600(TinyGsmSim7600& modem, uint8_t mux = 0)
+			: GsmClientSim7600(modem, mux)
+   
+		 
+		{}
 
-    GsmClientSecure(TinyGsmSim7600& modem, uint8_t mux = 0)
-     : public GsmClient(modem, mux)
-    {}
+	public:
+		bool setCertificate(const String & certificateName) {
+			return at->setCertificate(certificateName, mux);
+		}
 
-  public:
     int connect(const char* host, uint16_t port, int timeout_s) override {
       stop();
       TINY_GSM_YIELD();
@@ -148,7 +156,7 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
     }
     TINY_GSM_CLIENT_CONNECT_OVERRIDES
   };
-  */
+  
 
   /*
    * Constructor
@@ -255,7 +263,12 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
   /*
    * Generic network functions
    */
- public:
+public:
+	bool setCertificate(const String & certificateName, const uint8_t mux = 0) {
+		if (mux >= TINY_GSM_MUX_COUNT) return false;
+		certificates[mux] = certificateName;
+		return true;
+	}   
   RegStatus getRegistrationStatus() {
     return (RegStatus)getRegistrationStatusXREG("CGREG");
   }
@@ -407,12 +420,12 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
    * Phone Call functions
    */
  protected:
-  bool callAnswerImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
-  bool callNumberImpl(const String& number) TINY_GSM_ATTR_NOT_IMPLEMENTED;
-  bool callHangupImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
-  bool dtmfSendImpl(char cmd,
-                    int  duration_ms = 100) TINY_GSM_ATTR_NOT_IMPLEMENTED;
-
+  bool callHangupImpl() {
+    sendAT(GF("+CHUP"));
+    return waitResponse() == 1;
+  }
+	
+	
   /*
    * Messaging functions
    */
@@ -459,7 +472,7 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
                   int* minute = 0, int* second = 0) {
     sendAT(GF("+CGNSSINFO"));
     if (waitResponse(GF(GSM_NL "+CGNSSINFO:")) != 1) { return false; }
-
+	delay(10);
     uint8_t fixMode = streamGetIntBefore(',');  // mode 2=2D Fix or 3=3DFix
                                                 // TODO(?) Can 1 be returned
     if (fixMode == 1 || fixMode == 2 || fixMode == 3) {
@@ -620,41 +633,106 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
   /*
    * Client related functions
    */
- protected:
-  bool modemConnect(const char* host, uint16_t port, uint8_t mux,
+protected:
+	bool _ssl = false;
+  
+   bool modemConnect(const char* host, uint16_t port, uint8_t mux,
                     bool ssl = false, int timeout_s = 15) {
-    if (ssl) { DBG("SSL not yet supported on this module!"); }
-    // Make sure we'll be getting data manually on this connection
-    sendAT(GF("+CIPRXGET=1"));
-    if (waitResponse() != 1) { return false; }
+						
+					this->_ssl = ssl;	
+ 		if (_ssl) {
+			sendAT(GF("+CSSLCFG=\"sslversion\",0,3"));
+			waitResponse();
+			// sendAT(GF("+CSSLCFG=\"authmode\",0,2"));
+			// waitResponse();
+			sendAT(GF("+CSSLCFG=\"ignorelocaltime\",0,1"));
+			waitResponse();
+			sendAT(GF("+CSSLCFG=\"negotiatetime\",0,25"));
+			waitResponse();
+			sendAT(GF("+CSSLCFG="), "\"cacert\",0,\"", certificates[mux].c_str(), "\"");
+			waitResponse();
+			// sendAT(GF("+CSSLCFG=\"clientcert\",0,\"cert.pem\""));
+			// waitResponse();
+			// sendAT(GF("+CSSLCFG=\"clientkey\",0,\"key_cert.pem\""));
+			// waitResponse();
+			sendAT(GF("+CCHSET=1,1"));
+			waitResponse();
+			sendAT(GF("+CCHSTART"));
+			waitResponse();
+			sendAT(GF("+CCHSSLCFG=0,0"));
+			waitResponse();
+		}
 
     // Establish a connection in multi-socket mode
     uint32_t timeout_ms = ((uint32_t)timeout_s) * 1000;
-    sendAT(GF("+CIPOPEN="), mux, ',', GF("\"TCP"), GF("\",\""), host, GF("\","),
-           port);
+		if (!_ssl) {
+			sendAT(GF("+CIPRXGET=1"));
+			if (waitResponse() != 1) { return false; }
+			sendAT(GF("+CIPOPEN="), mux, ',', GF("\"TCP"), GF("\",\""), host, GF("\","), port);
+		}
+		else {
+			sendAT(GF("+CCHOPEN=0,"), GF("\""), host, GF("\","), port, GF(",2"));
+		}
+
     // The reply is OK followed by +CIPOPEN: <link_num>,<err> where <link_num>
     // is the mux number and <err> should be 0 if there's no error
-    if (waitResponse(timeout_ms, GF(GSM_NL "+CIPOPEN:")) != 1) { return false; }
-    uint8_t opened_mux    = streamGetIntBefore(',');
-    uint8_t opened_result = streamGetIntBefore('\n');
-    if (opened_mux != mux || opened_result != 0) return false;
-    return true;
-  }
+ 
+		if (!_ssl) {
+			if (waitResponse(timeout_ms, GF(GSM_NL "+CIPOPEN:")) != 1) {
+				return false;
+			}
+		}
+		else {
+			if (waitResponse(timeout_ms, GF(GSM_NL "+CCHOPEN: 0,0")) != 1) {
+				return false;
+			}
+			else {
+				return true;
+			}
+		}
 
-  int16_t modemSend(const void* buff, size_t len, uint8_t mux) {
-    sendAT(GF("+CIPSEND="), mux, ',', (uint16_t)len);
-    if (waitResponse(GF(">")) != 1) { return 0; }
-    stream.write(reinterpret_cast<const uint8_t*>(buff), len);
-    stream.flush();
-    if (waitResponse(GF(GSM_NL "+CIPSEND:")) != 1) { return 0; }
-    streamSkipUntil(',');  // Skip mux
-    streamSkipUntil(',');  // Skip requested bytes to send
-    // TODO(?):  make sure requested and confirmed bytes match
-    return streamGetIntBefore('\n');
-  }
+	}
 
+ 	int16_t modemSend(const void* buff, size_t len, uint8_t mux) {
+		DBG("modemSend called ");
+		if (!_ssl) {
+			sendAT(GF("+CIPSEND="), mux, ',', (uint16_t)len);
+		}
+		else {
+			sendAT(GF("+CCHSEND="), mux, ',', (uint16_t)len);
+		}
+		DBG("modemSend waitResponse> called ");
+		if (waitResponse(GF(">")) != 1) {
+			return 0;
+		}
+		//SerialMon.print(buff);
+		stream.write(reinterpret_cast<const uint8_t*>(buff), len);
+		stream.flush();
+		if (!_ssl) {
+			if (waitResponse(GF(GSM_NL "+CIPSEND:")) != 1) {
+				return 0;
+			}
+		}
+		else {
+			DBG("modemSend waitResponse CCHSEND called ");
+			if (waitResponse(GF(GSM_NL "+CCHSEND:")) != 1)
+			{
+				return 0;
+			}
+		}
+
+		streamSkipUntil(',');  // Skip mux
+		streamSkipUntil(',');  // Skip requested bytes to send
+		// TODO(?):  make sure requested and confirmed bytes match
+		return streamGetIntBefore('\n');
+	}
   size_t modemRead(size_t size, uint8_t mux) {
-    if (!sockets[mux]) return 0;
+		DBG("modemRead  called ");
+		int16_t len_requested = 0;
+		int16_t len_confirmed = 0;
+		if (!sockets[mux]) return 0;
+		if (!_ssl)
+        {		 
 #ifdef TINY_GSM_USE_HEX
     sendAT(GF("+CIPRXGET=3,"), mux, ',', (uint16_t)size);
     if (waitResponse(GF("+CIPRXGET:")) != 1) { return 0; }
@@ -667,6 +745,22 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
     int16_t len_requested = streamGetIntBefore(',');
     //  ^^ Requested number of data bytes (1-1460 bytes)to be read
     int16_t len_confirmed = streamGetIntBefore('\n');
+	    }
+		else {
+			sendAT(GF("+CCHRECV="), mux, ',', (uint16_t)size);
+			DBG("modemRead  CCHRECV called ");
+			if (waitResponse(GF("+CCHRECV:")) != 1) {
+				return 0;
+			}
+			// DATA,0,4
+			streamSkipUntil(',');  //DATA,
+			streamSkipUntil(',');  // Skip mux/cid (0,)
+			len_requested = streamGetIntBefore('\n');
+			// DBG("###len_requested", len_requested);
+
+			len_confirmed = len_requested;
+		}
+		
     // ^^ The data length which not read in the buffer
     for (int i = 0; i < len_requested; i++) {
       uint32_t startMillis = millis();
@@ -687,46 +781,103 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
         TINY_GSM_YIELD();
       }
       char c = stream.read();
+	  //SerialMon.print(c);								  
 #endif
       sockets[mux]->rx.put(c);
     }
     // DBG("### READ:", len_requested, "from", mux);
-    // sockets[mux]->sock_available = modemGetAvailable(mux);
-    sockets[mux]->sock_available = len_confirmed;
-    waitResponse();
+    sockets[mux]->sock_available = modemGetAvailable(mux);
+    //sockets[mux]->sock_available = len_confirmed;
+	if (!_ssl)
+	{
+		waitResponse();
+	}		
     return len_requested;
   }
 
   size_t modemGetAvailable(uint8_t mux) {
-    if (!sockets[mux]) return 0;
-    sendAT(GF("+CIPRXGET=4,"), mux);
-    size_t result = 0;
+	  DBG("modemGetAvailable   called ");						  
+		if (!sockets[mux]) return 0;
+   
+		size_t result = 0;
+		if (!_ssl)
+		{
+			sendAT(GF("+CIPRXGET=4,"), mux);   
     if (waitResponse(GF("+CIPRXGET:")) == 1) {
       streamSkipUntil(',');  // Skip mode 4
       streamSkipUntil(',');  // Skip mux
       result = streamGetIntBefore('\n');
       waitResponse();
-    }
-    // DBG("### Available:", result, "on", mux);
-    if (!result) { sockets[mux]->sock_connected = modemGetConnected(mux); }
-    return result;
-  }
+			}
+		}
+		else
+			// AT+CCHRECV? +CCHRECV: LEN,<cache_len_0>,<cache_len_1>
+			sendAT(GF("+CCHRECV?"));
+			DBG("modemGetAvailable  +CCHRECV? called ");
+			if (waitResponse(GF("+CCHRECV:")) == 1) {
+				streamSkipUntil(',');  // Skip mode 4
+				result = streamGetIntBefore(',');
+				DBG("modemGetAvailable  +CCHRECV?2 called ");
+				waitResponse();
+			}
+		}
+		DBG("### Available:", result, "on", mux);
+		if (!result) {
+			sockets[mux]->sock_connected = modemGetConnected(mux);
+		}
+		return result;
+																   
+	 
+	}
 
-  bool modemGetConnected(uint8_t mux) {
-    // Read the status of all sockets at once
-    sendAT(GF("+CIPCLOSE?"));
-    if (waitResponse(GF("+CIPCLOSE:")) != 1) {
-      // return false;  // TODO:  Why does this not read correctly?
-    }
-    for (int muxNo = 0; muxNo < TINY_GSM_MUX_COUNT; muxNo++) {
-      // +CIPCLOSE:<link0_state>,<link1_state>,...,<link9_state>
-      bool muxState = stream.parseInt();
-      if (sockets[muxNo]) { sockets[muxNo]->sock_connected = muxState; }
-    }
-    waitResponse();  // Should be an OK at the end
-    if (!sockets[mux]) return false;
-    return sockets[mux]->sock_connected;
-  }
+	bool modemGetConnected(uint8_t mux) {
+		DBG("modemGetConnected called ");
+		// Read the status of all sockets at once
+		if (!_ssl)
+		{
+			sendAT(GF("+CIPCLOSE?"));
+			if (waitResponse(GF("+CIPCLOSE:")) != 1) {
+				return false;  // TODO:  Why does this not read correctly?
+			}
+			for (int muxNo = 0; muxNo < TINY_GSM_MUX_COUNT; muxNo++) {
+				// +CIPCLOSE:<link0_state>,<link1_state>,...,<link9_state>
+				bool muxState = stream.parseInt();
+				if (sockets[muxNo]) {
+					sockets[muxNo]->sock_connected = muxState;
+				}
+			}
+			waitResponse();  // Should be an OK at the end
+			if (!sockets[mux])
+				return false;
+			return sockets[mux]->sock_connected;
+		}
+		else {
+			sendAT(GF("+CCHOPEN?"));
+			DBG("modemGetConnected +CCHOPEN? waitResponsecalled ");
+			if (waitResponse(GF("+CCHOPEN:")) != 1) {
+				DBG("Modem not connectedXXXXXXXXXXXXXXXXX CCHOPEN Not Found");
+				return false;
+			}
+			//+CCHOPEN: 0,"",,,
+			streamSkipUntil(',');
+			String res = stream.readStringUntil(',');
+			if (res == "\"\"")
+			{
+				DBG("Modem not connectedXXXXXXXXXXXXXXXXX empty +CCHOPEN: 0,"",,, Found");
+				return false;
+			}
+			else {
+				DBG("************Modem is connected Found in sim7600 Library****************");
+				DBG("Dats is", res);
+				sockets[mux]->sock_connected = true;
+				waitResponse();  // Should be an OK at the end
+				sockets[mux]->sock_connected;
+				return true;
+			}
+		}
+
+		return false;
+	}
 
   /*
    * Utilities
@@ -858,6 +1009,7 @@ class TinyGsmSim7600 : public TinyGsmModem<TinyGsmSim7600>,
 
  protected:
   GsmClientSim7600* sockets[TINY_GSM_MUX_COUNT];
+  String certificates[TINY_GSM_MUX_COUNT];													 
   const char*       gsmNL = GSM_NL;
 };
 
